@@ -1,13 +1,13 @@
 module Machine = struct
 
-  type result =
-    | Done of int
+  type 'a result =
+    | Done of 'a list * int
     | Error of string
   ;;
 
   let null_writer = fun _ -> ();;
 
-  let run ~program ~inputs ~outputs ~memory_size ~log_writer =
+  let run ~program ~inputs ~memory_size ~log_writer =
     let the_end = Array.length program in
     let in_prog_range addr fn =
       if addr < 0 || addr >= the_end
@@ -33,7 +33,6 @@ module Machine = struct
 
     let rec loop steps pc register inputs outputs =
       let no_more_input = (List.length inputs) = 0 in
-      let no_more_output = (List.length outputs) = 0 in
       let at_the_end = (pc = the_end) in
       let log msg = log_writer (Printf.sprintf "[%d:%d] %s" steps pc msg) in
       let read_reg fn =
@@ -43,31 +42,21 @@ module Machine = struct
       in
 
       if at_the_end then
-        if no_more_input then
-          if no_more_output then Done(steps)
-          else Error(Printf.sprintf "Missing output. Items left: %d" (List.length outputs))
+        if no_more_input then Done(List.rev outputs, steps)
         else Error(Printf.sprintf "Not all input is processed. Items left: %d" (List.length inputs))
       else
         begin match program.(pc) with
         | `Input ->
           log "Input";
           begin match inputs with
-          | [] ->
-            if no_more_output then Done(steps + 1)
-            else Error(Printf.sprintf "Input: All input processed, missing output. Items left: %d" (List.length outputs))
-          | data :: inputs_left -> loop (steps + 1) (pc + 1) (Some(data)) inputs_left outputs
+          | [] -> Done(List.rev outputs, steps + 1)
+          | data :: inputs -> loop (steps + 1) (pc + 1) (Some(data)) inputs outputs
           end
         | `Output ->
           log "Output";
-          begin match outputs with
-          | [] -> Error("Output: No more output expected")
-          | expected :: outputs_left ->
-            begin match register with
-            | None -> Error("Output: Empty output not allowed")
-            | Some actual ->
-              if actual != expected then Error(Printf.sprintf "Output: expected %d, got %d" expected actual)
-              else loop (steps + 1) (pc + 1) None inputs outputs_left
-            end
+          begin match register with
+          | None -> Error("Output: Empty output not allowed")
+          | Some data -> loop (steps + 1) (pc + 1) None inputs (data :: outputs)
           end
         | `Jump addr ->
           log (Printf.sprintf "Jump: address %d" addr);
@@ -100,68 +89,116 @@ module Machine = struct
           )
         end
     in
-    loop 0 0 None inputs outputs
+    loop 0 0 None inputs []
   ;;
 
   module Tests = struct
-    let pass fmt = Printf.printf (Printf.sprintf "pass: %s\n" fmt);;
-    let fail fmt = Printf.printf (Printf.sprintf "fail: %s\n" fmt);;
-
-    let expect program inputs outputs ?memory_size:(memory_size=0) m =
-      fun () -> (m, (run ~program ~inputs ~outputs ~memory_size ~log_writer:null_writer))
-    ;;
-
-    let to_be_done_in expected fn =
-      let m, res = fn () in
-      match res with
-      | Error reason -> fail "%s (%s)" m reason
-      | Done actual ->
-        if actual != expected then
-          Printf.printf "fail: %s - expected %d, got %d steps\n" m expected actual
-        else
-          pass "%s" m
-    ;;
-
-    let to_be_done fn =
-      let m, res = fn () in
-      match res with
-      | Error reason -> Printf.printf "fail: %s (%s)\n" m reason
-      | Done _ -> Printf.printf "pass: %s\n" m
-    ;;
-
-    let to_error fn =
-      let m, res = fn () in
-      match res with
-      | Error reason -> Printf.printf "pass: %s\n" m
-      | Done _ -> Printf.printf "fail: %s - expected an error" m
-    ;;
+    exception Failure of string;;
 
     let describe text fn =
       Printf.printf "\n--- %s ---\n" text;
       fn ();
     ;;
 
+    let case text fn =
+      try
+        fn ();
+        Printf.printf "[ ok ] %s\n" text
+      with
+      | Failure reason -> Printf.printf "[fail] %s :: %s\n" text reason
+      | e -> Printf.printf "[fail] %s :: %s\n" text (Printexc.to_string e)
+    ;;
+
+    let expect program inputs =
+      run ~program ~inputs ~memory_size:1 ~log_writer:null_writer
+    ;;
+
+    let to_be_done res =
+      match res with
+      | Error reason -> raise (Failure(reason))
+      | Done _ -> res
+    ;;
+
+    let and_output expected_output res =
+      match res with
+      | Error reason -> raise (Failure(reason))
+      | Done (actual_output, _) ->
+        List.combine expected_output actual_output
+        |> List.iter (fun (e, a) ->
+          if a != e then raise (Failure("output did not match"))
+        );
+        res
+    ;;
+
+    let within expected_steps res =
+      match res with
+      | Error reason -> raise (Failure(reason))
+      | Done (_, actual_steps) ->
+        if actual_steps != expected_steps
+        then raise (Failure(Printf.sprintf "expected %d steps, got %d" expected_steps actual_steps))
+        else res
+    ;;
+
+    let to_error res =
+      match res with
+      | Error reason -> res
+      | Done _ -> raise (Failure("expected an error"))
+    ;;
+
 
     let run () =
       describe "simple" (fun () ->
-        "in/out" |> expect [|`Input;`Output|] [1] [1] |> to_be_done_in 2;
-        "loop" |> expect [|`Input;`Output;`Jump(0)|] [1;2] [1;2] |> to_be_done_in 7;
+        case "in/out" (fun () ->
+          expect [|`Input;`Output|] [1] |> to_be_done |> and_output [1] |> within 2
+        );
+
+        case "loop" (fun () ->
+          expect [|`Input;`Output;`Jump(0)|] [1;2] |> to_be_done |> and_output [1;2] |> within 7
+        );
       );
 
       describe "program end" (fun () ->
-        "missing output" |> expect [|`Output|] [1] [1] |> to_error;
-        "last input read" |> expect [|`Input;`Input;`Output|] [1] [] |> to_be_done_in 2;
+        case "missing output" (fun () ->
+          expect [|`Output|] [1] |> to_error
+        );
+
+        case "last input read" (fun () ->
+          expect [|`Input;`Input;`Output|] [1] |> to_be_done |> and_output [] |> within 2
+        );
       );
 
       describe "branching" (fun () ->
-        "jump if zero" |> expect [|`Input;`JumpIfZero(0);`Output;`Jump(0)|] [0;1;0;2;0] [1;2] |> to_be_done;
-        "jump if negative" |> expect [|`Input;`JumpIfNegative(0);`Output;`Jump(0)|] [0;1;-1;2;-2] [0;1;2] |> to_be_done;
+        case "jump if zero" (fun () ->
+          expect [|`Input;`JumpIfZero(0);`Output;`Jump(0)|] [0;1;0;2;0]
+          |> to_be_done
+          |> and_output [1;2]
+        );
+
+        case "jump if negative" (fun () ->
+          expect [|`Input;`JumpIfNegative(0);`Output;`Jump(0)|] [0;1;-1;2;-2]
+          |> to_be_done
+          |> and_output [0;1;2]
+        );
       );
 
       describe "intermediate" (fun () ->
-        "memory" |> expect ~memory_size:1 [|`Input;`CopyTo(0);`CopyFrom(0);`Output|] [1] [1] |> to_be_done;
-        "adding" |> expect ~memory_size:1 [|`Input;`CopyTo(0);`Add(0);`Output|] [1] [2] |> to_be_done;
-        "subtracting" |> expect ~memory_size:1 [|`Input;`CopyTo(0);`Input;`Sub(0);`Output|] [2;1] [-1] |> to_be_done;
+        case "memory" (fun () ->
+          expect [|`Input;`CopyTo(0);`CopyFrom(0);`Output|] [1]
+          |> to_be_done
+          |> and_output [1]
+        );
+
+        case "adding" (fun () ->
+          expect [|`Input;`CopyTo(0);`Add(0);`Output|] [1]
+          |> to_be_done
+          |> and_output [2]
+        );
+
+        case "subtracting" (fun () ->
+          expect [|`Input;`CopyTo(0);`Input;`Sub(0);`Output|] [2;1]
+          |> to_be_done
+          |> and_output [-1]
+        );
       );
     ;;
   end
