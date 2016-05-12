@@ -1,8 +1,8 @@
 module Machine = struct
 
   type 'a result =
-    | Done of 'a list * int
-    | Error of string
+    | Completed of 'a list * int
+    | Aborted of string
   ;;
 
   let null_writer = fun _ -> ();;
@@ -11,22 +11,22 @@ module Machine = struct
     let the_end = Array.length program in
     let in_prog_range addr fn =
       if addr < 0 || addr >= the_end
-      then Error(Printf.sprintf "Program address out of range: %d" addr)
+      then Aborted(Printf.sprintf "Program address out of range: %d" addr)
       else fn addr
     in
     let in_mem_range addr fn =
       if addr < 0 || addr >= Array.length memory
-      then Error(Printf.sprintf "Memory address out of range: %d" addr)
+      then Aborted(Printf.sprintf "Memory address out of range: %d" addr)
       else fn addr
     in
     let read_mem fn addr =
       match memory.(addr) with
-      | None -> Error(Printf.sprintf "Memory empty at address %d" addr)
+      | None -> Aborted(Printf.sprintf "Memory empty at address %d" addr)
       | Some data -> fn data
     in
     let write_mem data fn addr =
       match data with
-      | None -> Error("Register is empty")
+      | None -> Aborted("Register is empty")
       | Some _ -> memory.(addr) <- data; fn ()
     in
 
@@ -36,25 +36,25 @@ module Machine = struct
       let log msg = log_writer (Printf.sprintf "[%d:%d] %s" steps pc msg) in
       let read_reg fn =
         match register with
-        | None -> Error("Empty register")
+        | None -> Aborted("Empty register")
         | Some data -> fn data
       in
 
       if at_the_end then
-        if no_more_input then Done(List.rev outputs, steps)
-        else Error(Printf.sprintf "Not all input is processed. Items left: %d" (List.length inputs))
+        if no_more_input then Completed(List.rev outputs, steps)
+        else Aborted(Printf.sprintf "Not all input is processed. Items left: %d" (List.length inputs))
       else
         begin match program.(pc) with
         | `Input ->
           log "Input";
           begin match inputs with
-          | [] -> Done(List.rev outputs, steps + 1)
+          | [] -> Completed(List.rev outputs, steps + 1)
           | data :: inputs -> loop (steps + 1) (pc + 1) (Some(data)) inputs outputs
           end
         | `Output ->
           log "Output";
           begin match register with
-          | None -> Error("Output: Empty output not allowed")
+          | None -> Aborted("Output: Empty output not allowed")
           | Some data -> loop (steps + 1) (pc + 1) None inputs (data :: outputs)
           end
         | `Jump addr ->
@@ -121,16 +121,16 @@ module Machine = struct
       run ~program:comp.program ~inputs:input ~memory:comp.memory ~log_writer:null_writer
     ;;
 
-    let to_be_done res =
+    let to_complete res =
       match res with
-      | Error reason -> raise (Failure(reason))
-      | Done _ -> res
+      | Aborted reason -> raise (Failure(reason))
+      | Completed _ -> res
     ;;
 
     let and_output expected_output res =
       match res with
-      | Error reason -> raise (Failure(reason))
-      | Done (actual_output, _) ->
+      | Aborted reason -> raise (Failure(reason))
+      | Completed (actual_output, _) ->
         List.combine expected_output actual_output
         |> List.iter (fun (e, a) ->
           if a != e then raise (Failure("output did not match"))
@@ -140,17 +140,17 @@ module Machine = struct
 
     let within expected_steps res =
       match res with
-      | Error reason -> raise (Failure(reason))
-      | Done (_, actual_steps) ->
+      | Aborted reason -> raise (Failure(reason))
+      | Completed (_, actual_steps) ->
         if actual_steps != expected_steps
         then raise (Failure(Printf.sprintf "expected %d steps, got %d" expected_steps actual_steps))
         else res
     ;;
 
-    let to_error res =
+    let to_abort res =
       match res with
-      | Error reason -> res
-      | Done _ -> raise (Failure("expected an error"))
+      | Aborted reason -> res
+      | Completed _ -> raise (Failure("expected to abort"))
     ;;
 
     (* ------------------------------------------------------------------ *)
@@ -159,7 +159,7 @@ module Machine = struct
         case "in/out" (fun () ->
           expect [|`Input;`Output|]
           |> when_run_with [1]
-          |> to_be_done
+          |> to_complete
           |> and_output [1]
           |> within 2
         );
@@ -167,7 +167,7 @@ module Machine = struct
         case "loop" (fun () ->
           expect [|`Input;`Output;`Jump(0)|]
           |> when_run_with [1;2]
-          |> to_be_done
+          |> to_complete
           |> and_output [1;2]
           |> within 7
         );
@@ -175,11 +175,11 @@ module Machine = struct
 
       describe "program end" (fun () ->
         case "missing output" (fun () ->
-          expect [|`Output|] |> when_run_with [1] |> to_error
+          expect [|`Output|] |> when_run_with [1] |> to_abort
         );
 
         case "last input read" (fun () ->
-          expect [|`Input;`Input;`Output|] |> when_run_with [1] |> to_be_done |> and_output [] |> within 2
+          expect [|`Input;`Input;`Output|] |> when_run_with [1] |> to_complete |> and_output [] |> within 2
         );
       );
 
@@ -187,14 +187,14 @@ module Machine = struct
         case "jump if zero" (fun () ->
           expect [|`Input;`JumpIfZero(0);`Output;`Jump(0)|]
           |> when_run_with [0;1;0;2;0]
-          |> to_be_done
+          |> to_complete
           |> and_output [1;2]
         );
 
         case "jump if negative" (fun () ->
           expect [|`Input;`JumpIfNegative(0);`Output;`Jump(0)|]
           |> when_run_with [0;1;-1;2;-2]
-          |> to_be_done
+          |> to_complete
           |> and_output [0;1;2]
         );
       );
@@ -204,7 +204,7 @@ module Machine = struct
           expect [|`Input;`CopyTo(0);`CopyFrom(0);`Output|]
           |> with_memory [|None|]
           |> when_run_with [1]
-          |> to_be_done
+          |> to_complete
           |> and_output [1]
         );
 
@@ -212,7 +212,7 @@ module Machine = struct
           expect [|`Input;`CopyTo(0);`Add(0);`Output|]
           |> with_memory [|None|]
           |> when_run_with [1]
-          |> to_be_done
+          |> to_complete
           |> and_output [2]
         );
 
@@ -220,7 +220,7 @@ module Machine = struct
           expect [|`Input;`CopyTo(0);`Input;`Sub(0);`Output|]
           |> with_memory [|None|]
           |> when_run_with [2;1]
-          |> to_be_done
+          |> to_complete
           |> and_output [-1]
         );
       );
