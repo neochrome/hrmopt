@@ -7,16 +7,15 @@ module Machine = struct
 
   let null_writer = fun _ -> ();;
 
-  let run ~program ~inputs ~memory_size ~log_writer =
+  let run ~program ~inputs ~memory ~log_writer =
     let the_end = Array.length program in
     let in_prog_range addr fn =
       if addr < 0 || addr >= the_end
       then Error(Printf.sprintf "Program address out of range: %d" addr)
       else fn addr
     in
-    let memory = Array.init memory_size (fun _ -> None) in
     let in_mem_range addr fn =
-      if addr < 0 || addr >= memory_size
+      if addr < 0 || addr >= Array.length memory
       then Error(Printf.sprintf "Memory address out of range: %d" addr)
       else fn addr
     in
@@ -94,6 +93,7 @@ module Machine = struct
 
   module Tests = struct
     exception Failure of string;;
+    type ('a, 'b) computer = { program: 'a array; memory: 'b array };;
 
     let describe text fn =
       Printf.printf "\n--- %s ---\n" text;
@@ -109,8 +109,16 @@ module Machine = struct
       | e -> Printf.printf "[fail] %s :: %s\n" text (Printexc.to_string e)
     ;;
 
-    let expect program inputs =
-      run ~program ~inputs ~memory_size:1 ~log_writer:null_writer
+    let expect program =
+      { program = program; memory = [||] }
+    ;;
+
+    let with_memory mem comp =
+      { comp with memory = mem }
+    ;;
+
+    let when_run_with input comp =
+      run ~program:comp.program ~inputs:input ~memory:comp.memory ~log_writer:null_writer
     ;;
 
     let to_be_done res =
@@ -145,37 +153,47 @@ module Machine = struct
       | Done _ -> raise (Failure("expected an error"))
     ;;
 
-
+    (* ------------------------------------------------------------------ *)
     let run () =
       describe "simple" (fun () ->
         case "in/out" (fun () ->
-          expect [|`Input;`Output|] [1] |> to_be_done |> and_output [1] |> within 2
+          expect [|`Input;`Output|]
+          |> when_run_with [1]
+          |> to_be_done
+          |> and_output [1]
+          |> within 2
         );
 
         case "loop" (fun () ->
-          expect [|`Input;`Output;`Jump(0)|] [1;2] |> to_be_done |> and_output [1;2] |> within 7
+          expect [|`Input;`Output;`Jump(0)|]
+          |> when_run_with [1;2]
+          |> to_be_done
+          |> and_output [1;2]
+          |> within 7
         );
       );
 
       describe "program end" (fun () ->
         case "missing output" (fun () ->
-          expect [|`Output|] [1] |> to_error
+          expect [|`Output|] |> when_run_with [1] |> to_error
         );
 
         case "last input read" (fun () ->
-          expect [|`Input;`Input;`Output|] [1] |> to_be_done |> and_output [] |> within 2
+          expect [|`Input;`Input;`Output|] |> when_run_with [1] |> to_be_done |> and_output [] |> within 2
         );
       );
 
       describe "branching" (fun () ->
         case "jump if zero" (fun () ->
-          expect [|`Input;`JumpIfZero(0);`Output;`Jump(0)|] [0;1;0;2;0]
+          expect [|`Input;`JumpIfZero(0);`Output;`Jump(0)|]
+          |> when_run_with [0;1;0;2;0]
           |> to_be_done
           |> and_output [1;2]
         );
 
         case "jump if negative" (fun () ->
-          expect [|`Input;`JumpIfNegative(0);`Output;`Jump(0)|] [0;1;-1;2;-2]
+          expect [|`Input;`JumpIfNegative(0);`Output;`Jump(0)|]
+          |> when_run_with [0;1;-1;2;-2]
           |> to_be_done
           |> and_output [0;1;2]
         );
@@ -183,19 +201,25 @@ module Machine = struct
 
       describe "intermediate" (fun () ->
         case "memory" (fun () ->
-          expect [|`Input;`CopyTo(0);`CopyFrom(0);`Output|] [1]
+          expect [|`Input;`CopyTo(0);`CopyFrom(0);`Output|]
+          |> with_memory [|None|]
+          |> when_run_with [1]
           |> to_be_done
           |> and_output [1]
         );
 
         case "adding" (fun () ->
-          expect [|`Input;`CopyTo(0);`Add(0);`Output|] [1]
+          expect [|`Input;`CopyTo(0);`Add(0);`Output|]
+          |> with_memory [|None|]
+          |> when_run_with [1]
           |> to_be_done
           |> and_output [2]
         );
 
         case "subtracting" (fun () ->
-          expect [|`Input;`CopyTo(0);`Input;`Sub(0);`Output|] [2;1]
+          expect [|`Input;`CopyTo(0);`Input;`Sub(0);`Output|]
+          |> with_memory [|None|]
+          |> when_run_with [2;1]
           |> to_be_done
           |> and_output [-1]
         );
