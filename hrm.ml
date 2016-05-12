@@ -52,10 +52,7 @@ module Machine = struct
           | data :: input -> step next (Some(data)) input output
           end
         | `Output ->
-          begin match register with
-          | None -> Aborted("Output: Empty output not allowed")
-          | Some data -> step next None input (data :: output)
-          end
+          read_reg (fun data -> step next None input (data :: output))
         | `Jump addr ->
           in_prog_range addr (fun addr -> step addr register input output)
         | `JumpIfZero addr ->
