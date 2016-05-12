@@ -5,9 +5,7 @@ module Machine = struct
     | Aborted of string
   ;;
 
-  let null_writer = fun _ -> ();;
-
-  let run ~program ~inputs ~memory ~log_writer =
+  let run ~program ~input ~memory ~max_steps =
     let the_end = Array.length program in
     let in_prog_range addr fn =
       if addr < 0 || addr >= the_end
@@ -30,65 +28,59 @@ module Machine = struct
       | Some _ -> memory.(addr) <- data; fn ()
     in
 
-    let rec loop steps pc register inputs outputs =
-      let no_more_input = (List.length inputs) = 0 in
+    let rec loop steps pc register input output =
+      let step = loop (steps + 1) in
+      let next = pc + 1 in
+      let no_more_input = (List.length input) = 0 in
       let at_the_end = (pc = the_end) in
-      let log msg = log_writer (Printf.sprintf "[%d:%d] %s" steps pc msg) in
       let read_reg fn =
         match register with
         | None -> Aborted("Empty register")
         | Some data -> fn data
       in
 
-      if at_the_end then
-        if no_more_input then Completed(List.rev outputs, steps)
-        else Aborted(Printf.sprintf "Not all input is processed. Items left: %d" (List.length inputs))
+      if steps = max_steps then
+        Aborted(Printf.sprintf "Maximum number of steps (%d) reached" max_steps)
+      else if at_the_end then
+        if no_more_input then Completed(List.rev output, steps)
+        else Aborted(Printf.sprintf "Not all input is processed. Items left: %d" (List.length input))
       else
         begin match program.(pc) with
         | `Input ->
-          log "Input";
-          begin match inputs with
-          | [] -> Completed(List.rev outputs, steps + 1)
-          | data :: inputs -> loop (steps + 1) (pc + 1) (Some(data)) inputs outputs
+          begin match input with
+          | [] -> Completed(List.rev output, steps + 1)
+          | data :: input -> step next (Some(data)) input output
           end
         | `Output ->
-          log "Output";
           begin match register with
           | None -> Aborted("Output: Empty output not allowed")
-          | Some data -> loop (steps + 1) (pc + 1) None inputs (data :: outputs)
+          | Some data -> step next None input (data :: output)
           end
         | `Jump addr ->
-          log (Printf.sprintf "Jump: address %d" addr);
-          in_prog_range addr (fun addr -> loop (steps + 1) addr register inputs outputs)
+          in_prog_range addr (fun addr -> step addr register input output)
         | `JumpIfZero addr ->
-          log (Printf.sprintf "JumpIfZero: address %d" addr);
           in_prog_range addr (fun addr ->
-            read_reg (fun data -> loop (steps + 1) (if data = 0 then addr else (pc + 1)) register inputs outputs)
+            read_reg (fun data -> step (if data = 0 then addr else next) register input output)
           )
         | `JumpIfNegative addr ->
-          log (Printf.sprintf "JumpIfNegative: address %d" addr);
           in_prog_range addr (fun addr ->
-            read_reg (fun data -> loop (steps + 1) (if data < 0 then addr else (pc + 1)) register inputs outputs)
+            read_reg (fun data -> step (if data < 0 then addr else next) register input output)
           )
         | `CopyTo addr ->
-          log (Printf.sprintf "CopyTo: address %d" addr);
-          in_mem_range addr (write_mem register (fun () -> loop (steps + 1) (pc + 1) register inputs outputs))
+          in_mem_range addr (write_mem register (fun () -> step next register input output))
         | `CopyFrom addr ->
-          log (Printf.sprintf "CopyFrom: address %d" addr);
-          in_mem_range addr (read_mem (fun data -> loop (steps + 1) (pc + 1) (Some(data)) inputs outputs))
+          in_mem_range addr (read_mem (fun data -> step next (Some(data)) input output))
         | `Add addr ->
-          log (Printf.sprintf "Add: address %d" addr);
           in_mem_range addr (read_mem (fun data ->
-            read_reg (fun reg -> loop (steps + 1) (pc + 1) (Some(reg + data)) inputs outputs))
+            read_reg (fun reg -> step next (Some(reg + data)) input output))
           )
         | `Sub addr ->
-          log (Printf.sprintf "Sub: address %d" addr);
           in_mem_range addr (read_mem (fun data ->
-            read_reg (fun reg -> loop (steps + 1) (pc + 1) (Some(reg - data)) inputs outputs))
+            read_reg (fun reg -> step next (Some(reg - data)) input output))
           )
         end
     in
-    loop 0 0 None inputs []
+    loop 0 0 None input []
   ;;
 
   module Tests = struct
@@ -101,12 +93,14 @@ module Machine = struct
     ;;
 
     let case text fn =
+      let green = Printf.sprintf "\027[32m%s\027[0m" in
+      let red = Printf.sprintf "\027[31m%s\027[0m" in
       try
         fn ();
-        Printf.printf "[ ok ] %s\n" text
+        Printf.printf "[%s] %s\n" (green "pass") text
       with
-      | Failure reason -> Printf.printf "[fail] %s :: %s\n" text reason
-      | e -> Printf.printf "[fail] %s :: %s\n" text (Printexc.to_string e)
+      | Failure reason -> Printf.printf "[%s] %s :: %s\n" (red "fail") text reason
+      | e -> Printf.printf "[%s] %s :: %s\n" (red "fail") text (Printexc.to_string e)
     ;;
 
     let expect program =
@@ -118,7 +112,7 @@ module Machine = struct
     ;;
 
     let when_run_with input comp =
-      run ~program:comp.program ~inputs:input ~memory:comp.memory ~log_writer:null_writer
+      run ~program:comp.program ~input:input ~memory:comp.memory ~max_steps:256
     ;;
 
     let to_complete res =
@@ -180,6 +174,10 @@ module Machine = struct
 
         case "last input read" (fun () ->
           expect [|`Input;`Input;`Output|] |> when_run_with [1] |> to_complete |> and_output [] |> within 2
+        );
+
+        case "abort when max steps reached" (fun () ->
+          expect [|`Jump(0)|] |> when_run_with [] |> to_abort
         );
       );
 
